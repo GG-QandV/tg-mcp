@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sqlite3
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -33,13 +34,27 @@ _inbox: deque[dict] = deque(maxlen=MAX_INBOX)
 _listener_task: asyncio.Task | None = None
 
 
+def _clean_stale_sessions():
+    """Remove stale -journal files that block SQLite connections."""
+    for f in SESSION_DIR.glob("*.session-journal"):
+        try:
+            f.unlink()
+            logger.warning("Removed stale session journal: %s", f)
+        except OSError:
+            pass
+
+
 class InboxMessage:
     """Represents a message in the inbox buffer."""
     
     def __init__(self, msg: Message):
         self.id: int = msg.id
         self.chat_id: int = msg.chat_id
-        self.thread_id: int = getattr(msg, 'reply_to', None) or 0
+        reply_to = getattr(msg, 'reply_to', None)
+        if reply_to is not None:
+            self.thread_id: int = getattr(reply_to, 'reply_to_top_id', 0) or getattr(reply_to, 'reply_to_msg_id', 0)
+        else:
+            self.thread_id: int = 0
         self.sender_id: int = msg.sender_id or 0
         self.text: str = msg.text or ""
         self.date: datetime = msg.date
@@ -75,8 +90,10 @@ async def start_listener() -> None:
         logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set")
         return
 
+    _clean_stale_sessions()
+
     _persistent_client = TelegramClient(
-        SESSION_DIR / "inbox_session",
+        str(SESSION_DIR / "inbox_session"),
         api_id,
         api_hash,
         base_logger="telethon_inbox",
@@ -84,7 +101,17 @@ async def start_listener() -> None:
     )
     client = _persistent_client
 
-    await client.start()
+    try:
+        await client.start()
+    except sqlite3.OperationalError as e:
+        logger.error("Inbox session locked, trying to reconnect with fresh session: %s", e)
+        session_path = SESSION_DIR / "inbox_session.session"
+        if session_path.exists():
+            session_path.unlink()
+            _clean_stale_sessions()
+            await client.start()
+        else:
+            raise
     logger.info("Telegram listener connected (started with update loop)")
 
     @client.on(events.NewMessage)
@@ -94,17 +121,18 @@ async def start_listener() -> None:
             return
 
         # Filter by target chat
-        # Telethon strips -100 prefix for broadcast/megagroup IDs
         chat_id = msg.chat_id
         if TARGET_CHAT and chat_id != TARGET_CHAT:
             return
 
         # Filter by target thread (topic)
-        # In forum topics: reply_to_msg_id = topic root, reply_to_top_id = topic root (if replying)
         thread_id = 0
         reply_to = getattr(msg, 'reply_to', None)
-        if reply_to is not None and hasattr(reply_to, 'forum_topic') and reply_to.forum_topic:
-            thread_id = (getattr(reply_to, 'reply_to_top_id', None) or getattr(reply_to, 'reply_to_msg_id', 0))
+        if reply_to is not None:
+            if getattr(reply_to, 'forum_topic', False):
+                thread_id = getattr(reply_to, 'reply_to_top_id', 0) or getattr(reply_to, 'reply_to_msg_id', 0)
+            else:
+                thread_id = getattr(reply_to, 'reply_to_top_id', 0)
 
         if TARGET_THREAD and thread_id != TARGET_THREAD:
             return
@@ -115,9 +143,6 @@ async def start_listener() -> None:
         logger.info("Inbox: stored message %d from chat %s: %.60s",
                      msg.id, msg.chat_id, msg.text or "")
 
-    # Register the handler
-    client.add_event_handler(handle_new_message, events.NewMessage)
-
     # Keep connection alive
     _listener_task = asyncio.create_task(_keep_alive(client))
 
@@ -127,14 +152,26 @@ async def start_listener() -> None:
 
 async def _keep_alive(client: TelegramClient) -> None:
     """Keep the client connected and handle reconnection."""
-    try:
-        await client.run_until_disconnected()
-    except asyncio.CancelledError:
-        logger.info("Inbox listener cancelled")
-    except Exception as e:
-        logger.error("Inbox listener disconnected: %s", e)
-    finally:
-        logger.info("Inbox listener stopped")
+    retries = 0
+    while not asyncio.current_task().cancelled():
+        try:
+            await client.run_until_disconnected()
+        except asyncio.CancelledError:
+            logger.info("Inbox listener cancelled")
+            break
+        except Exception as e:
+            retries += 1
+            if retries > 5:
+                logger.error("Inbox listener: max retries exceeded: %s", e)
+                break
+            wait = min(2 ** retries, 60)
+            logger.warning("Inbox listener disconnected (retry %d/5, wait %ds): %s", retries, wait, e)
+            await asyncio.sleep(wait)
+            try:
+                await client.connect()
+            except Exception as conn_err:
+                logger.error("Inbox listener reconnect failed: %s", conn_err)
+    logger.info("Inbox listener stopped")
 
 
 async def stop_listener() -> None:
