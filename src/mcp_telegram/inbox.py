@@ -1,13 +1,8 @@
-"""
-Inbox buffer for Telegram MCP Bridge.
-Persistent Telethon connection with event handler for new messages.
-"""
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import sqlite3
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -17,36 +12,27 @@ from telethon import TelegramClient, events
 from telethon.tl.types import Message
 from xdg_base_dirs import xdg_state_home
 
-from .rate_limiter import create_rate_limiter_from_settings, get_rate_limiter
-
 logger = logging.getLogger(__name__)
 
-# Target chat and topic from environment
 TARGET_CHAT: int = int(os.environ.get("TG_TARGET_CHAT", "0"))
 TARGET_THREAD: int = int(os.environ.get("TG_TARGET_THREAD", "0"))
 MAX_INBOX: int = int(os.environ.get("TG_MAX_INBOX", "100"))
 
 SESSION_DIR: Path = xdg_state_home() / "mcp-telegram"
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
+SESSION_PATH: str = str(SESSION_DIR / "mcp_telegram_session")
+for f in SESSION_DIR.glob("*.session-journal"):
+    try:
+        f.unlink()
+    except OSError:
+        pass
 
 _persistent_client: TelegramClient | None = None
 _inbox: deque[dict] = deque(maxlen=MAX_INBOX)
 _listener_task: asyncio.Task | None = None
 
 
-def _clean_stale_sessions():
-    """Remove stale -journal files that block SQLite connections."""
-    for f in SESSION_DIR.glob("*.session-journal"):
-        try:
-            f.unlink()
-            logger.warning("Removed stale session journal: %s", f)
-        except OSError:
-            pass
-
-
 class InboxMessage:
-    """Represents a message in the inbox buffer."""
-    
     def __init__(self, msg: Message):
         self.id: int = msg.id
         self.chat_id: int = msg.chat_id
@@ -73,11 +59,6 @@ class InboxMessage:
 
 
 async def start_listener() -> None:
-    """Start the persistent Telegram listener with inbox event handler.
-
-    Uses its own TelegramClient (not shared with per-tool clients)
-    to maintain a persistent connection for push notifications.
-    """
     global _persistent_client, _listener_task
 
     if _persistent_client is not None:
@@ -90,12 +71,9 @@ async def start_listener() -> None:
         logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set")
         return
 
-    _clean_stale_sessions()
-
+    # Use same session as tools (mcp_telegram_session.session)
     _persistent_client = TelegramClient(
-        str(SESSION_DIR / "inbox_session"),
-        api_id,
-        api_hash,
+        SESSION_PATH, api_id, api_hash,
         base_logger="telethon_inbox",
         flood_sleep_threshold=0,
     )
@@ -103,16 +81,12 @@ async def start_listener() -> None:
 
     try:
         await client.start()
-    except sqlite3.OperationalError as e:
-        logger.error("Inbox session locked, trying to reconnect with fresh session: %s", e)
-        session_path = SESSION_DIR / "inbox_session.session"
-        if session_path.exists():
-            session_path.unlink()
-            _clean_stale_sessions()
-            await client.start()
-        else:
-            raise
-    logger.info("Telegram listener connected (started with update loop)")
+    except Exception as e:
+        logger.error("Inbox listener start failed: %s", e)
+        _persistent_client = None
+        return
+
+    logger.info("Inbox listener connected")
 
     @client.on(events.NewMessage)
     async def handle_new_message(event: events.NewMessage.Event) -> None:
@@ -120,12 +94,9 @@ async def start_listener() -> None:
         if not msg or not msg.text:
             return
 
-        # Filter by target chat
-        chat_id = msg.chat_id
-        if TARGET_CHAT and chat_id != TARGET_CHAT:
+        if TARGET_CHAT and msg.chat_id != TARGET_CHAT:
             return
 
-        # Filter by target thread (topic)
         thread_id = 0
         reply_to = getattr(msg, 'reply_to', None)
         if reply_to is not None:
@@ -137,21 +108,16 @@ async def start_listener() -> None:
         if TARGET_THREAD and thread_id != TARGET_THREAD:
             return
 
-        # Store in inbox
-        inbox_msg = InboxMessage(msg)
-        _inbox.append(inbox_msg.to_dict())
-        logger.info("Inbox: stored message %d from chat %s: %.60s",
+        _inbox.append(InboxMessage(msg).to_dict())
+        logger.info("Inbox: stored msg %d from chat %s: %.60s",
                      msg.id, msg.chat_id, msg.text or "")
 
-    # Keep connection alive
     _listener_task = asyncio.create_task(_keep_alive(client))
-
-    logger.info("Inbox listener started for chat=%s thread=%s",
+    logger.info("Inbox listener active for chat=%s thread=%s",
                 TARGET_CHAT or "all", TARGET_THREAD or "all")
 
 
 async def _keep_alive(client: TelegramClient) -> None:
-    """Keep the client connected and handle reconnection."""
     retries = 0
     while not asyncio.current_task().cancelled():
         try:
@@ -162,7 +128,7 @@ async def _keep_alive(client: TelegramClient) -> None:
         except Exception as e:
             retries += 1
             if retries > 5:
-                logger.error("Inbox listener: max retries exceeded: %s", e)
+                logger.error("Inbox listener max retries exceeded: %s", e)
                 break
             wait = min(2 ** retries, 60)
             logger.warning("Inbox listener disconnected (retry %d/5, wait %ds): %s", retries, wait, e)
@@ -175,7 +141,6 @@ async def _keep_alive(client: TelegramClient) -> None:
 
 
 async def stop_listener() -> None:
-    """Stop the persistent listener."""
     global _persistent_client, _listener_task
 
     if _listener_task and not _listener_task.done():
@@ -194,12 +159,10 @@ async def stop_listener() -> None:
 
 
 def get_pending() -> list[dict]:
-    """Get and clear all pending inbox messages."""
     items = list(_inbox)
     _inbox.clear()
     return items
 
 
 def peek_pending() -> int:
-    """Get count of pending messages without consuming."""
     return len(_inbox)
