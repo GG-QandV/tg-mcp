@@ -1,51 +1,63 @@
 from __future__ import annotations
 
 import logging
-from collections import deque
-from datetime import datetime
-
-from telethon.tl.types import Message
+from collections import defaultdict, deque
 
 logger = logging.getLogger(__name__)
 
-_inbox: deque[dict] = deque(maxlen=100)
+INBOX_MAXLEN = 200
 
 
-class InboxMessage:
-    def __init__(self, msg: Message):
-        self.id = msg.id
-        self.chat_id = msg.chat_id
-        reply_to = getattr(msg, 'reply_to', None)
-        if reply_to is not None:
-            self.thread_id = getattr(reply_to, 'reply_to_top_id', 0) or getattr(reply_to, 'reply_to_msg_id', 0)
-        else:
-            self.thread_id = 0
-        self.sender_id = msg.sender_id or 0
-        self.text = msg.text or ""
-        self.date = msg.date
-        self.has_media = bool(msg.media)
+class InboxEngine:
+    def __init__(self, maxlen: int = INBOX_MAXLEN):
+        self.maxlen = maxlen
+        self._buffers: dict[tuple[int, int], deque] = defaultdict(
+            lambda: deque(maxlen=self.maxlen)
+        )
+        self._lock = __import__("asyncio").Lock()
 
-    def to_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "chat_id": self.chat_id,
-            "thread_id": self.thread_id,
-            "sender_id": self.sender_id,
-            "text": self.text,
-            "date": self.date.isoformat() if self.date else None,
-            "has_media": self.has_media,
+    async def handle(self, event) -> None:
+        msg = event.message
+        if not msg or not msg.text:
+            return
+        chat_id = msg.chat_id
+        r = getattr(msg, "reply_to", None)
+        topic_id = (
+            getattr(r, "reply_to_top_id", None)
+            or getattr(r, "reply_to_msg_id", None)
+            or 0
+        )
+        entry = {
+            "id":   msg.id,
+            "text": msg.text or "",
+            "from": str(msg.sender_id),
+            "ts":   int(msg.date.timestamp()),
         }
+        key = (chat_id, topic_id)
+        async with self._lock:
+            buf = self._buffers[key]
+            if len(buf) == self.maxlen:
+                logger.warning(
+                    "inbox overflow chat=%d topic=%d dropping oldest",
+                    chat_id, topic_id
+                )
+            buf.append(entry)
 
+    async def peek(self, chat_id: int, topic_id: int) -> list:
+        key = (chat_id, topic_id)
+        async with self._lock:
+            return list(self._buffers.get(key, []))
 
-def push(msg: Message) -> None:
-    _inbox.append(InboxMessage(msg).to_dict())
-
-
-def get_pending() -> list[dict]:
-    items = list(_inbox)
-    _inbox.clear()
-    return items
-
-
-def peek_pending() -> int:
-    return len(_inbox)
+    async def ack(self, chat_id: int, topic_id: int, last_id: int) -> int:
+        key = (chat_id, topic_id)
+        async with self._lock:
+            buf = self._buffers.get(key)
+            if not buf:
+                return 0
+            before = len(buf)
+            remaining = deque(
+                (m for m in buf if m["id"] > last_id),
+                maxlen=self.maxlen
+            )
+            self._buffers[key] = remaining
+            return before - len(remaining)

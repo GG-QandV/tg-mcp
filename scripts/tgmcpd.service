@@ -1,0 +1,43 @@
+[Unit]
+Description=Telegram MCP Daemon
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=gg
+
+WorkingDirectory=/home/gg/tgmcpd/session
+
+ExecStart=/usr/local/bin/tgmcpd
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+
+ProtectHome=true
+ReadWritePaths=/home/gg/tgmcpd/session
+
+ProtectSystem=strict
+
+RuntimeDirectory=tgmcpd
+ReadWritePaths=/run/tgmcpd
+Environment=TGMCPD_SOCK=/run/tgmcpd/tgmcpd.sock
+
+PrivateTmp=true
+PrivateDevices=true
+PrivateUsers=false
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+
+UMask=0077
+
+SystemCallFilter=@system-service @basic-io
+SystemCallErrorNumber=EPERM
+
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

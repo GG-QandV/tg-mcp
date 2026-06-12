@@ -33,10 +33,26 @@ def sign_in(
 
 @app.command()
 def run() -> None:
-    """Run the mcp-telegram server."""
+    """Run the mcp-telegram server (single-process v1)."""
     from .server import run_mcp_server
 
     asyncio.run(run_mcp_server())
+
+
+@app.command()
+def daemon() -> None:
+    """Run tgmcpd daemon (persistent + IPC)."""
+    from .daemon import main as daemon_main
+
+    asyncio.run(daemon_main())
+
+
+@app.command()
+def proxy() -> None:
+    """Run tg-mcp-proxy (stdio ↔ IPC bridge)."""
+    from .proxy import run as proxy_run
+
+    asyncio.run(proxy_run())
 
 
 @app.command()

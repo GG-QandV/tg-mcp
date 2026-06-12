@@ -32,6 +32,11 @@ class TelegramSettings(BaseSettings):
         case_sensitive = False  # Разрешаем любой регистр для совместимости
         env_nested_delimiter = "__"  # Для вложенных настроек используем __
 
+    @property
+    def session_path(self) -> str:
+        from xdg_base_dirs import xdg_state_home
+        return str(xdg_state_home() / "mcp-telegram" / "mcp_telegram_session")
+
 
 async def connect_to_telegram(
     api_id: str, 

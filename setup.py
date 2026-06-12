@@ -66,6 +66,8 @@ setup(
         "console_scripts": [
             "45telega=mcp_telegram:app",
             "telega-mcp=mcp_telegram:app",
+            "tgmcpd=mcp_telegram.daemon:main",
+            "tg-mcp-proxy=mcp_telegram.proxy:run",
         ],
     },
     include_package_data=True,
