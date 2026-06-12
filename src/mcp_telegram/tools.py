@@ -2264,3 +2264,52 @@ async def get_all_chats(
         response.append(TextContent(type="text", text=f"Error: {str(e)}"))
     
     return response
+
+
+# ========================================
+# INBOX TOOLS
+# ========================================
+
+
+class InboxRead(ToolArgs):
+    """Read (and clear) pending inbox messages from the persistent Telegram listener."""
+    pass
+
+
+@tool_runner.register
+async def inbox_read(
+    args: InboxRead,
+) -> t.Sequence[TextContent | ImageContent | EmbeddedResource]:
+    logger.info("method[InboxRead] args[%s]", args)
+
+    from . import inbox as inbox_module
+
+    messages = inbox_module.get_pending()
+    if not messages:
+        return [TextContent(type="text", text="No new messages in inbox.")]
+
+    result_lines = [f"Inbox ({len(messages)} messages):"]
+    for m in messages:
+        result_lines.append(
+            f"  [{m['date']}] from={m['sender_id']} chat={m['chat_id']} "
+            f"thread={m['thread_id']}: {m['text']}"
+        )
+
+    return [TextContent(type="text", text="\n".join(result_lines))]
+
+
+class InboxPeek(ToolArgs):
+    """Peek at inbox message count without consuming messages."""
+    pass
+
+
+@tool_runner.register
+async def inbox_peek(
+    args: InboxPeek,
+) -> t.Sequence[TextContent | ImageContent | EmbeddedResource]:
+    logger.info("method[InboxPeek] args[%s]", args)
+
+    from . import inbox as inbox_module
+
+    count = inbox_module.peek_pending()
+    return [TextContent(type="text", text=f"Inbox has {count} pending message(s).")]

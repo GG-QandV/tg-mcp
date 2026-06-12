@@ -23,6 +23,7 @@ from mcp.types import (
 )
 
 from . import tools
+from . import inbox
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -178,9 +179,22 @@ async def run_mcp_server() -> None:
     debug_log(f"Available tools: {len(mapping)}")
     debug_log("Tool names", list(mapping.keys()))
 
+    # Start inbox listener (persistent Telegram connection for push)
+    inbox_task = asyncio.create_task(inbox.start_listener())
+    debug_log("Inbox listener task created")
+
     async with stdio_server() as (read_stream, write_stream):
         debug_log("stdio_server initialized, starting main loop...")
-        await app.run(read_stream, write_stream, app.create_initialization_options())
+        try:
+            await app.run(read_stream, write_stream, app.create_initialization_options())
+        finally:
+            debug_log("MCP server shutting down, stopping inbox listener...")
+            await inbox.stop_listener()
+            inbox_task.cancel()
+            try:
+                await inbox_task
+            except asyncio.CancelledError:
+                pass
 
 
 def main() -> None:
