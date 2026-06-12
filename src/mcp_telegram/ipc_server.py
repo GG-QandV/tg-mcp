@@ -19,6 +19,10 @@ def get_sock_path() -> str:
     return f"{runtime}/tgmcpd.sock"
 
 
+WAIT_TIMEOUT = 25.0
+IPC_WAIT_TIMEOUT = 27.0
+
+
 class IPCServer:
     DISPATCH_TIMEOUT = 30.0
 
@@ -132,12 +136,35 @@ class IPCServer:
             msgs = await self.inbox.peek(chat_id, topic_id)
             return {"messages": msgs}
 
+        elif method == "inbox_wait":
+            chat_id = params["chat_id"]
+            topic_id = params.get("topic_id", 0)
+            timeout = params.get("timeout", WAIT_TIMEOUT)
+            msgs = await asyncio.wait_for(
+                self.inbox.wait(chat_id, topic_id, timeout=timeout),
+                timeout=IPC_WAIT_TIMEOUT,
+            )
+            return {"messages": msgs}
+
         elif method == "inbox_ack":
             chat_id = params["chat_id"]
             topic_id = params.get("topic_id", 0)
             last_id = params["last_id"]
             dropped = await self.inbox.ack(chat_id, topic_id, last_id)
             return {"dropped": dropped}
+
+        elif method == "health":
+            store_health = await self.inbox.store.health_check()
+            buffers = {
+                f"{k[0]}_{k[1]}": len(v)
+                for k, v in self.inbox._buffers.items()
+            }
+            return {
+                "status": "ok",
+                "store": store_health,
+                "ram_buffers": buffers,
+                "telegram": self.client.is_connected(),
+            }
 
         else:
             raise ValueError(f"Unknown method: {method}")

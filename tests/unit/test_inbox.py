@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import pytest
+from unittest.mock import AsyncMock, MagicMock
 from tests.conftest import make_event
 
 
@@ -105,3 +107,100 @@ async def test_handle_reply_to_none(inbox):
     await inbox.handle(event)
     msgs = await inbox.peek(100, 0)
     assert len(msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_persists_to_store(inbox, inbox_store):
+    event = make_event(100, 205, 1, "persist me")
+    await inbox.handle(event)
+    stored = await inbox_store.read_all(100, 205)
+    assert len(stored) == 1
+    assert stored[0]["text"] == "persist me"
+
+
+@pytest.mark.asyncio
+async def test_restore_loads_unread_on_start(inbox_store):
+    await inbox_store.append(100, 205, {"id": 1, "text": "survivor"})
+    inbox = __import__("src.mcp_telegram.inbox", fromlist=[""]).InboxEngine(
+        store=inbox_store, maxlen=10
+    )
+    restored = await inbox.restore_from_store()
+    assert restored == 1
+    msgs = await inbox.peek(100, 205)
+    assert len(msgs) == 1
+    assert msgs[0]["text"] == "survivor"
+
+
+@pytest.mark.asyncio
+async def test_restore_fires_event_if_unread(inbox_store):
+    await inbox_store.append(100, 205, {"id": 1, "text": "trigger"})
+    inbox = __import__("src.mcp_telegram.inbox", fromlist=[""]).InboxEngine(
+        store=inbox_store, maxlen=10
+    )
+    await inbox.restore_from_store()
+    msgs = await inbox.wait(100, 205, timeout=1.0)
+    assert len(msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_wakes_on_event(inbox):
+    async def delayed_handle():
+        await asyncio.sleep(0.1)
+        await inbox.handle(make_event(100, 205, 99, "wake up"))
+
+    asyncio.create_task(delayed_handle())
+    msgs = await inbox.wait(100, 205, timeout=5.0)
+    assert len(msgs) == 1
+    assert msgs[0]["id"] == 99
+
+
+@pytest.mark.asyncio
+async def test_wait_returns_existing_immediately(inbox):
+    await inbox.handle(make_event(100, 205, 1, "already here"))
+    msgs = await inbox.wait(100, 205, timeout=1.0)
+    assert len(msgs) == 1
+    assert msgs[0]["id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_no_race_message_before_wait(inbox):
+    await inbox.handle(make_event(100, 205, 1, "before"))
+    ev = inbox._events[(100, 205)]
+    ev.clear()
+    msgs = await inbox.wait(100, 205, timeout=1.0)
+    assert len(msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_no_race_message_during_clear(inbox):
+    original_clear = asyncio.Event.clear
+
+    async def risky_clear():
+        ev = inbox._events[(100, 205)]
+        ev.clear()
+        await asyncio.sleep(0)
+        await inbox.handle(make_event(100, 205, 1, "during clear"))
+
+    asyncio.create_task(risky_clear())
+    msgs = await inbox.wait(100, 205, timeout=5.0)
+    assert len(msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_ack_syncs_store_and_buffer(inbox, inbox_store):
+    await inbox.handle(make_event(100, 205, 1, "one"))
+    await inbox.handle(make_event(100, 205, 2, "two"))
+    dropped = await inbox.ack(100, 205, last_id=1)
+    assert dropped == 1
+    remaining = await inbox.peek(100, 205)
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == 2
+    stored = await inbox_store.read_all(100, 205)
+    assert len(stored) == 1
+    assert stored[0]["id"] == 2
+
+
+@pytest.mark.asyncio
+async def test_wait_timeout_returns_empty(inbox):
+    msgs = await inbox.wait(999, 999, timeout=0.1)
+    assert msgs == []

@@ -8,6 +8,7 @@ from pathlib import Path
 from telethon import TelegramClient, events
 
 from .inbox import InboxEngine
+from .inbox_store import InboxStore
 from .ipc_server import IPCServer, get_sock_path
 from .telegram import TelegramSettings
 
@@ -37,17 +38,34 @@ async def main() -> None:
 
     await _check_stale_socket(sock_path)
 
-    for f in Path(cfg.session_path).parent.glob("*.session-journal"):
+    session_path = (
+        str(Path(cfg.session_path).parent / "bot_session")
+        if cfg.bot_token
+        else cfg.session_path
+    )
+
+    session_dir = Path(session_path).parent
+    session_dir.mkdir(parents=True, exist_ok=True)
+    for f in session_dir.glob("*.session-journal"):
         try:
             f.unlink()
         except OSError:
             pass
 
-    client = TelegramClient(cfg.session_path, cfg.api_id, cfg.api_hash)
-    await client.start()
+    store = InboxStore(store_dir=cfg.store_dir)
+
+    client = TelegramClient(session_path, cfg.api_id, cfg.api_hash)
+    if cfg.bot_token:
+        await client.start(bot_token=cfg.bot_token)
+    else:
+        await client.start()
     logger.info("Telegram connected")
 
-    inbox = InboxEngine()
+    inbox = InboxEngine(store=store)
+    restored = await inbox.restore_from_store()
+    if restored:
+        logger.warning("Restored %d unread messages from disk after restart", restored)
+
     client.add_event_handler(inbox.handle, events.NewMessage)
 
     ipc = IPCServer(inbox, client)

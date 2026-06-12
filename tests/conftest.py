@@ -24,9 +24,15 @@ def tmp_sock_path(tmp_path):
 
 
 @pytest.fixture
-def inbox():
+def inbox_store(tmp_path):
+    from src.mcp_telegram.inbox_store import InboxStore
+    return InboxStore(str(tmp_path / "store"))
+
+
+@pytest.fixture
+def inbox(inbox_store):
     from src.mcp_telegram.inbox import InboxEngine
-    return InboxEngine(maxlen=10)
+    return InboxEngine(store=inbox_store, maxlen=10)
 
 
 def make_event(chat_id: int, topic_id: int, msg_id: int, text: str):

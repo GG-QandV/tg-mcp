@@ -14,9 +14,14 @@ from xdg_base_dirs import xdg_state_home  # type: ignore[import-error]
 from .qr_auth import QRAuthHandler
 
 
+from pydantic import Field
+
+
 class TelegramSettings(BaseSettings):
     api_id: str
     api_hash: str
+    bot_token: str | None = Field(default=None, validation_alias="TG_BOT_TOKEN")
+    store_dir: str = "/home/gg/tgmcpd/inbox_store"
     
     # Rate Limiter настройки
     rate_limit_enabled: bool = True

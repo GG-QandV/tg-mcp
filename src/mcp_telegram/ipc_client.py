@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 CONNECT_RETRIES = 10
 CONNECT_DELAY = 0.5
-CALL_TIMEOUT = 30.0
+CALL_TIMEOUT = 120.0
 
 
 def get_sock_path() -> str:
