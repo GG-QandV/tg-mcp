@@ -6,55 +6,58 @@ from unittest.mock import AsyncMock, MagicMock
 from tests.conftest import make_event
 
 
-@pytest_asyncio.fixture
-async def running_server(tmp_sock_path, inbox, mock_telegram_client):
-    from src.mcp_telegram.ipc_server import IPCServer
-    srv = IPCServer(inbox, mock_telegram_client)
-    task = asyncio.create_task(srv.start(tmp_sock_path))
-    await asyncio.sleep(0.05)
-    yield tmp_sock_path
-    task.cancel()
+@pytest.mark.asyncio
+async def test_bridge_pushes_message_to_opencode(inbox, respx_mock):
+    from src.mcp_telegram.inbox_bridge import InboxBridge
 
+    respx_mock.get("http://localhost:7777/session").respond(
+        json=[{"id": "ses_test", "time": {"updated": 1000}}],
+    )
+    push_route = respx_mock.post("http://localhost:7777/session/ses_test/prompt_async").respond(
+        status_code=204,
+    )
 
-@pytest_asyncio.fixture
-async def running_server_with_store(tmp_path, mock_telegram_client):
-    from src.mcp_telegram.inbox_store import InboxStore
-    from src.mcp_telegram.inbox import InboxEngine
-    from src.mcp_telegram.ipc_server import IPCServer, get_sock_path
+    bridge = InboxBridge(inbox=inbox, topic_map=[(100, 205, 7777)], retry_max=1, retry_delay=0.05)
+    bridge_task = asyncio.create_task(bridge.start())
 
-    store = InboxStore(str(tmp_path / "store"))
-    inbox = InboxEngine(store=store, maxlen=10)
-    sock = str(tmp_path / "tgmcpd.sock")
-    srv = IPCServer(inbox, mock_telegram_client)
-    task = asyncio.create_task(srv.start(sock))
-    await asyncio.sleep(0.05)
-    yield sock, inbox, store
-    task.cancel()
+    await inbox.handle(make_event(100, 205, 1, "hello from bridge"))
+    await asyncio.sleep(0.3)
+
+    assert push_route.called
+    sent = json.loads(push_route.calls.last.request.content)
+    prompt = json.loads(sent["prompt"])
+    assert prompt["message_count"] == 1
+    assert prompt["messages"][0]["text"] == "hello from bridge"
+
+    remaining = await inbox.peek(100, 205)
+    assert remaining == []
+
+    bridge_task.cancel()
 
 
 @pytest.mark.asyncio
-async def test_message_triggers_inbox_subscribe(running_server, inbox):
-    from src.mcp_telegram.ipc_client import IPCClient
+async def test_bridge_handles_session_rediscovery(inbox, respx_mock):
+    from src.mcp_telegram.inbox_bridge import InboxBridge
 
-    client = IPCClient(running_server)
-    await client.connect()
-
-    wait_task = asyncio.create_task(
-        client.call("inbox_wait", {
-            "chat_id": 100, "topic_id": 205, "timeout": 10.0,
-        })
+    respx_mock.get("http://localhost:7777/session").respond(
+        json=[{"id": "ses_v2", "time": {"updated": 2000}}],
+    )
+    push_fail = respx_mock.post("http://localhost:7777/session/ses_old/prompt_async").respond(
+        status_code=404,
+    )
+    push_ok = respx_mock.post("http://localhost:7777/session/ses_v2/prompt_async").respond(
+        status_code=204,
     )
 
-    await asyncio.sleep(0.05)
-    await inbox.handle(make_event(100, 205, 1, "hello from tg"))
+    bridge = InboxBridge(inbox=inbox, topic_map=[(100, 205, 7777)], retry_max=1, retry_delay=0.05)
 
-    result = await asyncio.wait_for(wait_task, timeout=5.0)
-    msgs = result["messages"]
-    assert len(msgs) == 1
-    assert msgs[0]["text"] == "hello from tg"
-    assert msgs[0]["id"] == 1
+    session_id = await bridge._get_session_id(7777)
+    assert session_id == "ses_v2"
 
-    await client.close()
+    ok = await bridge._push(7777, "ses_old", [{"id": 1, "text": "hi"}])
+    assert ok is True
+    assert push_fail.called
+    assert push_ok.called
 
 
 @pytest.mark.asyncio
@@ -71,45 +74,10 @@ async def test_message_survives_daemon_restart(tmp_path, mock_telegram_client):
     restored = await inbox2.restore_from_store()
     assert restored == 1
 
-    msgs = await inbox2.wait(200, 310, timeout=1.0)
+    msgs = await inbox2.wait(200, 310)
     assert len(msgs) == 1
     assert msgs[0]["text"] == "survive restart"
     assert msgs[0]["id"] == 5
-
-
-@pytest.mark.asyncio
-async def test_concurrent_topics_isolated(running_server, inbox):
-    from src.mcp_telegram.ipc_client import IPCClient
-
-    client_205 = IPCClient(running_server)
-    await client_205.connect()
-
-    client_310 = IPCClient(running_server)
-    await client_310.connect()
-
-    wait_205 = asyncio.create_task(
-        client_205.call("inbox_wait", {
-            "chat_id": 100, "topic_id": 205, "timeout": 2.0,
-        })
-    )
-    wait_310 = asyncio.create_task(
-        client_310.call("inbox_wait", {
-            "chat_id": 100, "topic_id": 310, "timeout": 2.0,
-        })
-    )
-
-    await asyncio.sleep(0.05)
-    await inbox.handle(make_event(100, 310, 10, "only for 310"))
-
-    result_310 = await asyncio.wait_for(wait_310, timeout=5.0)
-    assert len(result_310["messages"]) == 1
-    assert result_310["messages"][0]["text"] == "only for 310"
-
-    result_205 = await asyncio.wait_for(wait_205, timeout=5.0)
-    assert result_205["messages"] == []
-
-    await client_205.close()
-    await client_310.close()
 
 
 @pytest.mark.asyncio

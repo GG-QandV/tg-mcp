@@ -138,7 +138,7 @@ async def test_restore_fires_event_if_unread(inbox_store):
         store=inbox_store, maxlen=10
     )
     await inbox.restore_from_store()
-    msgs = await inbox.wait(100, 205, timeout=1.0)
+    msgs = await inbox.wait(100, 205)
     assert len(msgs) == 1
 
 
@@ -149,7 +149,7 @@ async def test_wait_wakes_on_event(inbox):
         await inbox.handle(make_event(100, 205, 99, "wake up"))
 
     asyncio.create_task(delayed_handle())
-    msgs = await inbox.wait(100, 205, timeout=5.0)
+    msgs = await inbox.wait(100, 205)
     assert len(msgs) == 1
     assert msgs[0]["id"] == 99
 
@@ -157,7 +157,7 @@ async def test_wait_wakes_on_event(inbox):
 @pytest.mark.asyncio
 async def test_wait_returns_existing_immediately(inbox):
     await inbox.handle(make_event(100, 205, 1, "already here"))
-    msgs = await inbox.wait(100, 205, timeout=1.0)
+    msgs = await inbox.wait(100, 205)
     assert len(msgs) == 1
     assert msgs[0]["id"] == 1
 
@@ -167,7 +167,7 @@ async def test_wait_no_race_message_before_wait(inbox):
     await inbox.handle(make_event(100, 205, 1, "before"))
     ev = inbox._events[(100, 205)]
     ev.clear()
-    msgs = await inbox.wait(100, 205, timeout=1.0)
+    msgs = await inbox.wait(100, 205)
     assert len(msgs) == 1
 
 
@@ -182,7 +182,7 @@ async def test_wait_no_race_message_during_clear(inbox):
         await inbox.handle(make_event(100, 205, 1, "during clear"))
 
     asyncio.create_task(risky_clear())
-    msgs = await inbox.wait(100, 205, timeout=5.0)
+    msgs = await inbox.wait(100, 205)
     assert len(msgs) == 1
 
 
@@ -201,6 +201,13 @@ async def test_ack_syncs_store_and_buffer(inbox, inbox_store):
 
 
 @pytest.mark.asyncio
-async def test_wait_timeout_returns_empty(inbox):
-    msgs = await inbox.wait(999, 999, timeout=0.1)
-    assert msgs == []
+async def test_wait_is_cancellable(inbox):
+    """wait() on an empty inbox blocks indefinitely — no polling.
+    The only way to stop it is CancelledError (e.g. bridge shutdown).
+    """
+    task = asyncio.create_task(inbox.wait(999, 999))
+    await asyncio.sleep(0.05)  # confirm it is still running
+    assert not task.done()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

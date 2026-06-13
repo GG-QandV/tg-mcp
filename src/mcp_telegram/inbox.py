@@ -7,7 +7,6 @@ from collections import defaultdict, deque
 logger = logging.getLogger(__name__)
 
 INBOX_MAXLEN = 200
-WAIT_TIMEOUT = 25.0
 
 
 class InboxEngine:
@@ -79,23 +78,36 @@ class InboxEngine:
     async def peek(self, chat_id: int, topic_id: int) -> list:
         key = (chat_id, topic_id)
         async with self._lock:
-            return list(self._buffers.get(key, []))
+            buf = list(self._buffers.get(key, []))
+            if buf:
+                return buf
+        return await self.store.read_all(chat_id, topic_id)
 
-    async def wait(
-        self, chat_id: int, topic_id: int,
-        timeout: float = WAIT_TIMEOUT,
-    ) -> list:
+    async def clear_ram_buffer(self, chat_id: int, topic_id: int) -> None:
+        key = (chat_id, topic_id)
+        async with self._lock:
+            if key in self._buffers:
+                self._buffers[key].clear()
+            if key in self._events:
+                self._events[key].clear()
+
+    async def wait(self, chat_id: int, topic_id: int) -> list:
+        """Block until a real Telegram message arrives for this (chat, topic).
+
+        Never polls. Wakes only when handle() sets the event.
+        If the RAM buffer already has messages (e.g. restored on startup),
+        returns them immediately — giving the bridge exactly ONE push attempt.
+        After clear_ram_buffer() the event is cleared too, so this call
+        will sleep until the next genuine incoming message.
+        """
         key = (chat_id, topic_id)
         ev = self._events[key]
-        ev.clear()
         async with self._lock:
             existing = list(self._buffers.get(key, []))
             if existing:
                 return existing
-        try:
-            await asyncio.wait_for(ev.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            return []
+        await ev.wait()  # blocks indefinitely — no polling
+        ev.clear()
         async with self._lock:
             return list(self._buffers.get(key, []))
 
