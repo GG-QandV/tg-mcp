@@ -1,7 +1,10 @@
 # ruff: noqa: T201
 from __future__ import annotations
 
+import logging
 from functools import cache
+
+logger = logging.getLogger(__name__)
 from getpass import getpass
 from typing import Optional
 
@@ -23,18 +26,26 @@ class TelegramSettings(BaseSettings):
     bot_token: str | None = Field(default=None, validation_alias="TG_BOT_TOKEN")
     store_dir: str = "/home/gg/tgmcpd/inbox_store"
     
-    opencode_port: int = 7777
-
+    # TG_TOPIC_MAP format: "chat_id:topic_id:tmux_session:tmux_window[,...]"
+    # Example: "-1003998609906:205:agent:opencode"
+    # tmux_pane = "session:window", e.g. "agent:opencode"
     topic_map_raw: str = Field(default="", validation_alias="TG_TOPIC_MAP")
 
     @property
-    def topic_map(self) -> list[tuple[int, int, int]]:
+    def topic_map(self) -> list[tuple[int, int, str]]:
         if not self.topic_map_raw:
             return []
         result = []
         for entry in self.topic_map_raw.split(","):
-            chat_id, topic_id, port = entry.strip().split(":")
-            result.append((int(chat_id), int(topic_id), int(port)))
+            # split at most 3 times: [chat_id, topic_id, session, window]
+            parts = entry.strip().split(":", 3)
+            if len(parts) != 4:
+                logger.warning("TG_TOPIC_MAP entry %r must have 4 fields, skipping", entry)
+                continue
+            chat_id = int(parts[0])
+            topic_id = int(parts[1])
+            tmux_pane = f"{parts[2]}:{parts[3]}"   # "session:window"
+            result.append((chat_id, topic_id, tmux_pane))
         return result
 
     # Rate Limiter настройки

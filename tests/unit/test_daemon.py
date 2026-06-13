@@ -100,7 +100,7 @@ async def test_bridge_created_and_started(tmp_path):
         mock_settings.return_value.bot_token = None
         mock_settings.return_value.api_id = "123"
         mock_settings.return_value.api_hash = "abc"
-        mock_settings.return_value.topic_map = [(1, 2, 7777), (3, 4, 7778)]
+        mock_settings.return_value.topic_map = [(1, 2, "agent:opencode"), (3, 4, "agent2:opencode")]
 
         client_instance = mock_client_class.return_value
         client_instance.start = AsyncMock()
@@ -122,6 +122,6 @@ async def test_bridge_created_and_started(tmp_path):
 
         mock_bridge_class.assert_called_once_with(
             inbox=mock_inbox,
-            topic_map=[(1, 2, 7777), (3, 4, 7778)],
+            topic_map=[(1, 2, "agent:opencode"), (3, 4, "agent2:opencode")],
         )
         bridge_instance.start.assert_awaited_once()

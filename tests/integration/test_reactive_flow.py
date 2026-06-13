@@ -1,64 +1,85 @@
 import asyncio
-import json
 import pytest
-import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, patch
 from tests.conftest import make_event
 
 
+# ── bridge → tmux push ────────────────────────────────────────────────────────
+
 @pytest.mark.asyncio
-async def test_bridge_pushes_message_to_opencode(inbox, respx_mock):
+async def test_bridge_pushes_message_via_tmux(inbox):
+    """Full flow: TG message → InboxEngine → InboxBridge → tmux paste-buffer."""
     from src.mcp_telegram.inbox_bridge import InboxBridge
 
-    respx_mock.get("http://localhost:7777/session").respond(
-        json=[{"id": "ses_test", "time": {"updated": 1000}}],
-    )
-    push_route = respx_mock.post("http://localhost:7777/session/ses_test/prompt_async").respond(
-        status_code=204,
-    )
+    pane = "agent:opencode"
+    bridge = InboxBridge(inbox=inbox, topic_map=[(100, 205, pane)], retry_max=1, retry_delay=0.05)
 
-    bridge = InboxBridge(inbox=inbox, topic_map=[(100, 205, 7777)], retry_max=1, retry_delay=0.05)
+    # Patch subprocess так, чтобы has-session(0) + load-buffer(0) + paste-buffer(0) + send-keys(0)
+    def _proc(rc=0):
+        p = AsyncMock()
+        p.returncode = rc
+        p.communicate = AsyncMock(return_value=(b"", b""))
+        p.wait = AsyncMock(return_value=rc)
+        return p
+
+    exec_calls = []
+
+    async def fake_exec(*args, **kwargs):
+        exec_calls.append(args)
+        return _proc(0)
+
     bridge_task = asyncio.create_task(bridge.start())
 
-    await inbox.handle(make_event(100, 205, 1, "hello from bridge"))
-    await asyncio.sleep(0.3)
-
-    assert push_route.called
-    sent = json.loads(push_route.calls.last.request.content)
-    prompt = json.loads(sent["prompt"])
-    assert prompt["message_count"] == 1
-    assert prompt["messages"][0]["text"] == "hello from bridge"
-
-    remaining = await inbox.peek(100, 205)
-    assert remaining == []
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await inbox.handle(make_event(100, 205, 1, "hello from bridge"))
+        await asyncio.sleep(0.3)
 
     bridge_task.cancel()
+    try:
+        await bridge_task
+    except asyncio.CancelledError:
+        pass
+
+    # Убеждаемся что tmux has-session и paste-buffer были вызваны
+    cmds = [" ".join(str(a) for a in call) for call in exec_calls]
+    assert any("has-session" in c for c in cmds), f"has-session not called: {cmds}"
+    assert any("paste-buffer" in c for c in cmds), f"paste-buffer not called: {cmds}"
+    assert any(pane in c for c in cmds), f"pane {pane} not in any call: {cmds}"
 
 
 @pytest.mark.asyncio
-async def test_bridge_handles_session_rediscovery(inbox, respx_mock):
+async def test_bridge_pane_missing_msgs_stay_in_store(inbox_store, tmp_path):
+    """УМ-Л + УМ-И: pane недоступен → msgs не теряются, store не опустошается."""
     from src.mcp_telegram.inbox_bridge import InboxBridge
+    from src.mcp_telegram.inbox import InboxEngine
 
-    respx_mock.get("http://localhost:7777/session").respond(
-        json=[{"id": "ses_v2", "time": {"updated": 2000}}],
-    )
-    push_fail = respx_mock.post("http://localhost:7777/session/ses_old/prompt_async").respond(
-        status_code=404,
-    )
-    push_ok = respx_mock.post("http://localhost:7777/session/ses_v2/prompt_async").respond(
-        status_code=204,
-    )
+    real_inbox = InboxEngine(store=inbox_store, maxlen=10)
+    await real_inbox.handle(make_event(100, 205, 1, "stay in store"))
 
-    bridge = InboxBridge(inbox=inbox, topic_map=[(100, 205, 7777)], retry_max=1, retry_delay=0.05)
+    pane = "agent:opencode"
+    bridge = InboxBridge(inbox=real_inbox, topic_map=[(100, 205, pane)], retry_max=1, retry_delay=0.01)
+    bridge._pane_exists = AsyncMock(return_value=False)
+    bridge._push_via_tmux = AsyncMock()
 
-    session_id = await bridge._get_session_id(7777)
-    assert session_id == "ses_v2"
+    # Запускаем watch — он должен вернуть уже стоящие сообщения, обнаружить отсутствие pane
+    # и уйти в сон (после clear_ram_buffer event сброшен, wait подвиснет)
+    watch_task = asyncio.create_task(bridge.watch(100, 205, pane))
+    await asyncio.sleep(0.1)
+    watch_task.cancel()
+    try:
+        await watch_task
+    except asyncio.CancelledError:
+        pass
 
-    ok = await bridge._push(7777, "ses_old", [{"id": 1, "text": "hi"}])
-    assert ok is True
-    assert push_fail.called
-    assert push_ok.called
+    # push не был вызван
+    bridge._push_via_tmux.assert_not_called()
+    # ack не был вызван → сообщения остались в store
+    remaining = await inbox_store.read_all(100, 205)
+    assert len(remaining) == 1
+    assert remaining[0]["text"] == "stay in store"
 
+
+# ── store persistence (bridge-independent) ────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_message_survives_daemon_restart(tmp_path, mock_telegram_client):
