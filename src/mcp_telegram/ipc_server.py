@@ -20,7 +20,6 @@ def get_sock_path() -> str:
 
 
 WAIT_TIMEOUT = 25.0
-IPC_WAIT_TIMEOUT = 27.0
 
 
 class IPCServer:
@@ -134,16 +133,6 @@ class IPCServer:
             chat_id = params["chat_id"]
             topic_id = params.get("topic_id", 0)
             msgs = await self.inbox.peek(chat_id, topic_id)
-            return {"messages": msgs}
-
-        elif method == "inbox_wait":
-            chat_id = params["chat_id"]
-            topic_id = params.get("topic_id", 0)
-            timeout = params.get("timeout", WAIT_TIMEOUT)
-            msgs = await asyncio.wait_for(
-                self.inbox.wait(chat_id, topic_id, timeout=timeout),
-                timeout=IPC_WAIT_TIMEOUT,
-            )
             return {"messages": msgs}
 
         elif method == "inbox_ack":

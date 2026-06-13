@@ -8,6 +8,7 @@ from pathlib import Path
 from telethon import TelegramClient, events
 
 from .inbox import InboxEngine
+from .inbox_bridge import InboxBridge
 from .inbox_store import InboxStore
 from .ipc_server import IPCServer, get_sock_path
 from .telegram import TelegramSettings
@@ -70,10 +71,16 @@ async def main() -> None:
 
     ipc = IPCServer(inbox, client)
 
+    bridge = InboxBridge(
+        inbox=inbox,
+        topic_map=cfg.topic_map,
+    )
+
     try:
         await asyncio.gather(
             ipc.start(sock_path),
             client.run_until_disconnected(),
+            bridge.start(),
         )
     finally:
         Path(sock_path).unlink(missing_ok=True)

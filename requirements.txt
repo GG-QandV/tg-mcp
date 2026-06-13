@@ -21,4 +21,4 @@ tenacity
 typer
 
 # Auth
-qrcode
+qrcodehttpx

@@ -23,6 +23,20 @@ class TelegramSettings(BaseSettings):
     bot_token: str | None = Field(default=None, validation_alias="TG_BOT_TOKEN")
     store_dir: str = "/home/gg/tgmcpd/inbox_store"
     
+    opencode_port: int = 7777
+
+    topic_map_raw: str = Field(default="", validation_alias="TG_TOPIC_MAP")
+
+    @property
+    def topic_map(self) -> list[tuple[int, int, int]]:
+        if not self.topic_map_raw:
+            return []
+        result = []
+        for entry in self.topic_map_raw.split(","):
+            chat_id, topic_id, port = entry.strip().split(":")
+            result.append((int(chat_id), int(topic_id), int(port)))
+        return result
+
     # Rate Limiter настройки
     rate_limit_enabled: bool = True
     global_rate_limit: int = 30

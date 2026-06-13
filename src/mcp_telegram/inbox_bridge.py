@@ -105,7 +105,7 @@ class InboxBridge:
                 async with httpx.AsyncClient() as client:
                     r = await client.post(
                         f"http://localhost:{port}/session/{current_session}/prompt_async",
-                        json={"prompt": prompt},
+                        json={"parts": [{"type": "text", "text": prompt}]},
                         timeout=5.0,
                     )
                     if r.status_code == 204:
